@@ -1,6 +1,6 @@
 from datetime import date, datetime
 from uuid import uuid4
-from sqlalchemy import BigInteger, Date, DateTime, ForeignKey, ForeignKeyConstraint, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, BigInteger, Date, DateTime, ForeignKey, ForeignKeyConstraint, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 from .db import Base
 
@@ -50,6 +50,8 @@ class Account(Base):
     kind: Mapped[str] = mapped_column(String(16))
     opening_minor: Mapped[int] = mapped_column(BigInteger, default=0)
     currency: Mapped[str] = mapped_column(String(3), default='PHP')
+    archived: Mapped[bool] = mapped_column(Boolean, default=False)
+    version: Mapped[int] = mapped_column(Integer, default=1)
 
 class Transaction(Base):
     __tablename__ = 'transactions'
@@ -62,6 +64,7 @@ class Transaction(Base):
     category: Mapped[str] = mapped_column(String(40))
     kind: Mapped[str] = mapped_column(String(16))
     amount_minor: Mapped[int] = mapped_column(BigInteger)
+    version: Mapped[int] = mapped_column(Integer, default=1)
 
 class Budget(Base):
     __tablename__ = 'budgets'

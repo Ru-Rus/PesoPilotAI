@@ -50,12 +50,29 @@ try:
         summary = c.get('/api/v1/analytics/summary?month=2026-10').json()
         assert summary['net_minor'] == 9997 and summary['budgets'][0]['spent_minor'] == 3
         assert c.get('/api/v1/accounts').json()[0]['balance_minor'] == 9997
+        edit = {**body, 'amount': '101.00', 'version': 1}
+        response = c.patch(f'/api/v1/transactions/{transaction}', json=edit)
+        assert response.status_code == 200 and response.json()['version'] == 2, response.text
+        assert c.patch(f'/api/v1/transactions/{transaction}', json=edit).status_code == 409
+        assert c.get('/api/v1/accounts').json()[0]['balance_minor'] == 10097
+        first = c.get('/api/v1/transactions?limit=1').json()[0]
+        page = c.get(f"/api/v1/transactions?limit=1&before_date={first['occurred_at']}&before_id={first['id']}").json()
+        assert len(page) == 1 and page[0]['id'] != first['id']
+        account_edit = dict(name='Renamed synthetic', kind='cash', opening_minor=0, archived=True, version=1)
+        response = c.patch(f'/api/v1/accounts/{account}', json=account_edit)
+        assert response.status_code == 200 and response.json()['version'] == 2, response.text
+        assert c.patch(f'/api/v1/accounts/{account}', json=account_edit).status_code == 409
+        assert c.post('/api/v1/transactions', json=body).status_code == 409
+        assert c.post('/api/v1/imports/preview', data={'account_id': account}, files=files).status_code == 409
+        assert c.patch(f'/api/v1/accounts/{account}', json={**account_edit, 'version': 2, 'archived': False}).status_code == 200
         sign_in(c, users[1])
         assert c.get('/api/v1/accounts').json() == []
         assert c.get('/api/v1/transactions').json() == []
         assert c.get('/api/v1/analytics/summary?month=2026-10').json()['budgets'] == []
         assert c.post('/api/v1/transactions', json=body).status_code == 404
         assert c.delete(f'/api/v1/transactions/{transaction}').status_code == 404
+        assert c.patch(f'/api/v1/transactions/{transaction}', json=edit).status_code == 404
+        assert c.patch(f'/api/v1/accounts/{account}', json=account_edit).status_code == 404
         assert c.post('/api/v1/imports/preview', data={'account_id': account}, files=files).status_code == 404
         assert c.post('/api/v1/imports/confirm', data=data, files=files).status_code == 404
         token = c.cookies.get(SESSION_COOKIE)
@@ -63,7 +80,7 @@ try:
             db.get(AuthSession, digest(token)).expires_at = now() - timedelta(seconds=1)
             db.commit()
         assert c.get('/api/v1/accounts').status_code == 401
-        print('SQL Server smoke passed: cookie sessions, anonymous/cross-user denial, expiry, CSV repeat protection, budgets and exact reconciliation.')
+        print('SQL Server smoke passed: cookie sessions, anonymous/cross-user denial, expiry, CSV repeat protection, budgets, exact SQL reconciliation, edits/stale conflicts, archive/restore and cursor pagination.')
 finally:
     with Session() as db:
         for model in (AuthEvent, AuthSession, ImportBatch, Transaction, Budget, Account):

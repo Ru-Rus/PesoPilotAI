@@ -1,0 +1,22 @@
+name: Development checks
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install backend dependencies
+        run: |
+          python3 -m venv backend/.venv
+          backend/.venv/bin/python -m pip install -r backend/requirements.txt
+      - name: Backend tests
+        working-directory: backend
+        run: .venv/bin/python -m pytest -q
+      - name: Frontend checks
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run typecheck
+          npm run build

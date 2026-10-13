@@ -3,7 +3,7 @@ from datetime import date
 from typing import Literal
 from fastapi import Depends, FastAPI, HTTPException, UploadFile, File, Form
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-from sqlalchemy import select, text
+from sqlalchemy import select, text, func, case, update, or_, and_
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 from .db import session
@@ -30,7 +30,7 @@ def account_owned(db, account_id, user):
     return account
 
 class Input(BaseModel):
-    model_config = ConfigDict(extra='forbid')
+    model_config = ConfigDict(extra='forbid', str_strip_whitespace=True)
 
 class AccountInput(Input):
     name: str = Field(min_length=1, max_length=80)
@@ -58,6 +58,13 @@ class TransactionInput(Input):
         minor(value)
         return value
 
+class AccountEdit(AccountInput):
+    version: int = Field(ge=1)
+    archived: bool = False
+
+class TransactionEdit(TransactionInput):
+    version: int = Field(ge=1)
+
 class BudgetInput(Input):
     month: str = Field(pattern=r'^\d{4}-(0[1-9]|1[0-2])$')
     category: str
@@ -83,8 +90,18 @@ def ready(db: Session = Depends(session)):
 @app.get('/api/v1/accounts')
 def accounts(db: Session = Depends(session), user=Depends(owner)):
     rows = db.scalars(select(Account).where(Account.user_id == user)).all()
-    tx = db.scalars(select(Transaction).where(Transaction.user_id == user)).all()
-    return [{**dump(a), 'balance_minor': a.opening_minor + sum(t.amount_minor if t.kind == 'income' else -t.amount_minor for t in tx if t.account_id == a.id)} for a in rows]
+    balances = dict(db.execute(select(Transaction.account_id, func.sum(case((Transaction.kind == 'income', Transaction.amount_minor), else_=-Transaction.amount_minor))).where(Transaction.user_id == user).group_by(Transaction.account_id)).all())
+    return [{**dump(a), 'balance_minor': a.opening_minor + balances.get(a.id, 0)} for a in rows]
+
+@app.patch('/api/v1/accounts/{account_id}')
+def edit_account(account_id: int, body: AccountEdit, db: Session = Depends(session), user=Depends(owner)):
+    account_owned(db, account_id, user)
+    result = db.execute(update(Account).where(Account.id == account_id, Account.user_id == user, Account.version == body.version).values(**body.model_dump(exclude={'version'}), version=Account.version + 1))
+    if result.rowcount != 1:
+        db.rollback()
+        raise HTTPException(409, 'Account changed; reload before editing')
+    db.commit()
+    return dump(account_owned(db, account_id, user))
 
 @app.post('/api/v1/accounts', status_code=201)
 def add_account(body: AccountInput, db: Session = Depends(session), user=Depends(owner)):
@@ -95,14 +112,48 @@ def add_account(body: AccountInput, db: Session = Depends(session), user=Depends
     return dump(row)
 
 @app.get('/api/v1/transactions')
-def transactions(limit: int = 100, db: Session = Depends(session), user=Depends(owner)):
+def transactions(limit: int = 100, before_date: date | None = None, before_id: int | None = None, account_id: int | None = None, db: Session = Depends(session), user=Depends(owner)):
     if not 1 <= limit <= 500:
         raise HTTPException(422, 'Limit must be 1–500')
-    return [dump(t) for t in db.scalars(select(Transaction).where(Transaction.user_id == user).order_by(Transaction.occurred_at.desc(), Transaction.id.desc()).limit(limit))]
+    query = select(Transaction).where(Transaction.user_id == user)
+    if account_id is not None:
+        account_owned(db, account_id, user)
+        query = query.where(Transaction.account_id == account_id)
+    if (before_date is None) != (before_id is None) or (before_id is not None and before_id < 1):
+        raise HTTPException(422, 'Cursor requires a date and positive ID')
+    if before_date is not None:
+        query = query.where(or_(Transaction.occurred_at < before_date, and_(Transaction.occurred_at == before_date, Transaction.id < before_id)))
+    return [dump(t) for t in db.scalars(query.order_by(Transaction.occurred_at.desc(), Transaction.id.desc()).limit(limit))]
+
+def writable_account(db, account_id, user):
+    account = account_owned(db, account_id, user)
+    if account.archived:
+        raise HTTPException(409, 'Restore this account before adding or editing entries')
+    return account
+
+def transaction_owned(db, transaction_id, user):
+    row = db.scalar(select(Transaction).where(Transaction.id == transaction_id, Transaction.user_id == user))
+    if row is None:
+        event(db, 'authorization_denied', user)
+        raise HTTPException(404, 'Transaction not found')
+    return row
+
+@app.patch('/api/v1/transactions/{transaction_id}')
+def edit_transaction(transaction_id: int, body: TransactionEdit, db: Session = Depends(session), user=Depends(owner)):
+    row = transaction_owned(db, transaction_id, user)
+    writable_account(db, row.account_id, user)
+    writable_account(db, body.account_id, user)
+    values = body.model_dump(exclude={'amount', 'version'})
+    result = db.execute(update(Transaction).where(Transaction.id == transaction_id, Transaction.user_id == user, Transaction.version == body.version).values(**values, amount_minor=minor(body.amount), version=Transaction.version + 1))
+    if result.rowcount != 1:
+        db.rollback()
+        raise HTTPException(409, 'Transaction changed; reload before editing')
+    db.commit()
+    return dump(transaction_owned(db, transaction_id, user))
 
 @app.post('/api/v1/transactions', status_code=201)
 def add_transaction(body: TransactionInput, db: Session = Depends(session), user=Depends(owner)):
-    account_owned(db, body.account_id, user)
+    writable_account(db, body.account_id, user)
     row = Transaction(user_id=user, amount_minor=minor(body.amount), **body.model_dump(exclude={'amount'}))
     db.add(row)
     db.commit()
@@ -140,10 +191,13 @@ def summary(month: str, db: Session = Depends(session), user=Depends(owner)):
         end = date(start.year + (start.month == 12), 1 if start.month == 12 else start.month + 1, 1)
     except ValueError:
         raise HTTPException(422, 'Month must be YYYY-MM')
-    rows = db.scalars(select(Transaction).where(Transaction.user_id == user, Transaction.occurred_at >= start, Transaction.occurred_at < end)).all()
-    income = sum(t.amount_minor for t in rows if t.kind == 'income')
-    expense = sum(t.amount_minor for t in rows if t.kind == 'expense')
-    categories = {c: sum(t.amount_minor for t in rows if t.category == c and t.kind == 'expense') for c in CATEGORIES}
+    totals = db.execute(select(Transaction.kind, Transaction.category, func.sum(Transaction.amount_minor)).where(Transaction.user_id == user, Transaction.occurred_at >= start, Transaction.occurred_at < end).group_by(Transaction.kind, Transaction.category)).all()
+    income = sum(n for kind, _, n in totals if kind == 'income')
+    expense = sum(n for kind, _, n in totals if kind == 'expense')
+    categories = {c: 0 for c in CATEGORIES}
+    for kind, category, amount in totals:
+        if kind == 'expense':
+            categories[category] = amount
     budgets = db.scalars(select(Budget).where(Budget.user_id == user, Budget.month == month)).all()
     return {'income_minor': income, 'expense_minor': expense, 'net_minor': income - expense, 'categories': categories, 'budgets': [{**dump(b), 'spent_minor': categories[b.category]} for b in budgets]}
 
@@ -156,7 +210,7 @@ async def csv_data(file):
 
 @app.post('/api/v1/imports/preview')
 async def preview(account_id: int = Form(...), file: UploadFile = File(...), db: Session = Depends(session), user=Depends(owner)):
-    account_owned(db, account_id, user)
+    writable_account(db, account_id, user)
     content, rows = await csv_data(file)
     digest = hashlib.sha256(content).hexdigest()
     imported = db.scalar(select(ImportBatch).where(ImportBatch.user_id == user, ImportBatch.account_id == account_id, ImportBatch.digest == digest))
@@ -171,7 +225,7 @@ async def preview(account_id: int = Form(...), file: UploadFile = File(...), db:
 
 @app.post('/api/v1/imports/confirm')
 async def confirm(account_id: int = Form(...), digest: str = Form(...), acknowledge_duplicates: bool = Form(False), file: UploadFile = File(...), db: Session = Depends(session), user=Depends(owner)):
-    account_owned(db, account_id, user)
+    writable_account(db, account_id, user)
     content, rows = await csv_data(file)
     if hashlib.sha256(content).hexdigest() != digest:
         raise HTTPException(409, 'File changed; preview again')

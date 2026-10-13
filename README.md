@@ -12,7 +12,9 @@ PHP personal finance app with separate `frontend` (Next.js + TypeScript) and `ba
 - CSRF token plus exact Origin checks on protected writes; user-scoped authorization on every finance endpoint; database ownership constraints.
 - SQL Server rate limits shared across app workers and authentication event records without passwords, tokens or financial details.
 
-This remains local development software. Account editing/archiving, transaction editing, transfers/refunds, pagination, AI, export/deletion, monitoring and production hardening remain roadmap work.
+This is an authenticated development application. Account edit/archive/restore, version-protected transaction editing, cursor pagination, and SQL aggregate dashboards are implemented. Transfers/refunds, AI, export/deletion, browser E2E, monitoring and production hardening remain roadmap work. See [current development status](MD/Development_Status.md).
+
+Before starting an existing checkout after pulling these changes, stop the API, run `.venv/Scripts/python.exe -m alembic upgrade head` from `backend`, then restart it. Migration `0003` adds archive flags and edit versions without removing finance records. The configured workspace database was upgraded successfully.
 
 ## Start on this workspace
 
@@ -90,7 +92,7 @@ npm.cmd run typecheck
 npm.cmd run build
 ```
 
-Verified: 45 backend tests; SQL Server migration `0002`; real SQL Server authorization/account/import/budget/reconciliation smoke; real Keycloak login/logout including the HTTPS frontend proxy; frontend production build and TypeScript check. Test provider accounts and finance smoke rows were removed. Browser interaction and accessibility audits are still pending.
+Current checks: 49 backend tests; SQL Server migration `0003`; real SQL Server authorization/account/import/budget/reconciliation/edit/archive/pagination smoke; previously verified real Keycloak login/logout including the HTTPS frontend proxy (not rerun for this change); frontend production build and TypeScript check. Test provider accounts and finance smoke rows were removed. Browser interaction and accessibility audits are still pending.
 
 The default fixed-window limits are 10 authentication/anonymous attempts and 120 authenticated requests per 60 seconds. Authentication uses the connection's IP address, ignoring untrusted forwarded headers; behind the frontend proxy it conservatively shares an authentication bucket. Review trusted-proxy client-IP handling before hosting a public service. `auth_events` records login, logout, expiry, rejected requests and rate-limit events. Production retention, alerting and provider back-channel logout are not implemented.
 
