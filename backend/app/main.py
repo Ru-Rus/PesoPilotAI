@@ -3,27 +3,25 @@ from datetime import date
 from typing import Literal
 from fastapi import Depends, FastAPI, HTTPException, UploadFile, File, Form
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-from sqlalchemy import select, text, func, case, update, or_, and_
+from sqlalchemy import delete, select, text, func, case, update, or_, and_
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 from .db import session
-from .auth import event, owner, router as auth_router
-from .models import Account, Transaction, Budget, ImportBatch
+from .auth import event, now, owner, router as auth_router
+from .models import AuthEvent, Account, Transaction, Budget, ImportBatch
 from .finance import CATEGORIES, minor, parse_csv
 
 app = FastAPI(title='PesoPilot API', version='0.1.0')
 app.include_router(auth_router, prefix='/api/v1/auth')
 
-@app.middleware('http')
-async def privacy_headers(request, call_next):
-    response = await call_next(request)
-    response.headers['Cache-Control'] = 'no-store'
-    response.headers['Referrer-Policy'] = 'no-referrer'
-    response.headers['X-Content-Type-Options'] = 'nosniff'
-    return response
+from .security import install_security
+install_security(app)
 
-def account_owned(db, account_id, user):
-    account = db.scalar(select(Account).where(Account.id == account_id, Account.user_id == user))
+def account_owned(db, account_id, user, lock=False):
+    query = select(Account).where(Account.id == account_id, Account.user_id == user)
+    if lock:
+        query = query.with_hint(Account, 'WITH (UPDLOCK, HOLDLOCK, ROWLOCK)', dialect_name='mssql').execution_options(populate_existing=True)
+    account = db.scalar(query)
     if not account:
         event(db, 'authorization_denied', user)
         raise HTTPException(404, 'Account not found')
@@ -43,7 +41,7 @@ class TransactionInput(Input):
     description: str = Field(min_length=1, max_length=160)
     category: str
     kind: Literal['income', 'expense']
-    amount: str
+    amount: str = Field(max_length=32)
 
     @field_validator('category')
     @classmethod
@@ -66,9 +64,10 @@ class TransactionEdit(TransactionInput):
     version: int = Field(ge=1)
 
 class BudgetInput(Input):
+    version: int | None = Field(default=None, ge=1)
     month: str = Field(pattern=r'^\d{4}-(0[1-9]|1[0-2])$')
     category: str
-    amount: str
+    amount: str = Field(max_length=32)
     _category = field_validator('category')(TransactionInput.category_valid.__func__)
     _amount = field_validator('amount')(TransactionInput.amount_valid.__func__)
 
@@ -95,11 +94,12 @@ def accounts(db: Session = Depends(session), user=Depends(owner)):
 
 @app.patch('/api/v1/accounts/{account_id}')
 def edit_account(account_id: int, body: AccountEdit, db: Session = Depends(session), user=Depends(owner)):
-    account_owned(db, account_id, user)
+    account_owned(db, account_id, user, lock=True)
     result = db.execute(update(Account).where(Account.id == account_id, Account.user_id == user, Account.version == body.version).values(**body.model_dump(exclude={'version'}), version=Account.version + 1))
     if result.rowcount != 1:
         db.rollback()
         raise HTTPException(409, 'Account changed; reload before editing')
+    db.add(AuthEvent(event='account_updated', user_id=user, occurred_at=now()))
     db.commit()
     return dump(account_owned(db, account_id, user))
 
@@ -107,6 +107,7 @@ def edit_account(account_id: int, body: AccountEdit, db: Session = Depends(sessi
 def add_account(body: AccountInput, db: Session = Depends(session), user=Depends(owner)):
     row = Account(user_id=user, **body.model_dump())
     db.add(row)
+    db.add(AuthEvent(event='finance_created', user_id=user, occurred_at=now()))
     db.commit()
     db.refresh(row)
     return dump(row)
@@ -126,7 +127,7 @@ def transactions(limit: int = 100, before_date: date | None = None, before_id: i
     return [dump(t) for t in db.scalars(query.order_by(Transaction.occurred_at.desc(), Transaction.id.desc()).limit(limit))]
 
 def writable_account(db, account_id, user):
-    account = account_owned(db, account_id, user)
+    account = account_owned(db, account_id, user, lock=True)
     if account.archived:
         raise HTTPException(409, 'Restore this account before adding or editing entries')
     return account
@@ -141,13 +142,14 @@ def transaction_owned(db, transaction_id, user):
 @app.patch('/api/v1/transactions/{transaction_id}')
 def edit_transaction(transaction_id: int, body: TransactionEdit, db: Session = Depends(session), user=Depends(owner)):
     row = transaction_owned(db, transaction_id, user)
-    writable_account(db, row.account_id, user)
-    writable_account(db, body.account_id, user)
+    for account_id in sorted({row.account_id, body.account_id}):
+        writable_account(db, account_id, user)
     values = body.model_dump(exclude={'amount', 'version'})
     result = db.execute(update(Transaction).where(Transaction.id == transaction_id, Transaction.user_id == user, Transaction.version == body.version).values(**values, amount_minor=minor(body.amount), version=Transaction.version + 1))
     if result.rowcount != 1:
         db.rollback()
         raise HTTPException(409, 'Transaction changed; reload before editing')
+    db.add(AuthEvent(event='transaction_updated', user_id=user, occurred_at=now()))
     db.commit()
     return dump(transaction_owned(db, transaction_id, user))
 
@@ -156,31 +158,44 @@ def add_transaction(body: TransactionInput, db: Session = Depends(session), user
     writable_account(db, body.account_id, user)
     row = Transaction(user_id=user, amount_minor=minor(body.amount), **body.model_dump(exclude={'amount'}))
     db.add(row)
+    db.add(AuthEvent(event='finance_created', user_id=user, occurred_at=now()))
     db.commit()
     db.refresh(row)
     return dump(row)
 
 @app.delete('/api/v1/transactions/{transaction_id}', status_code=204)
-def delete_transaction(transaction_id: int, db: Session = Depends(session), user=Depends(owner)):
-    row = db.scalar(select(Transaction).where(Transaction.id == transaction_id, Transaction.user_id == user))
-    if row is None:
-        event(db, 'authorization_denied', user)
-        raise HTTPException(404, 'Transaction not found')
-    db.delete(row)
+def delete_transaction(transaction_id: int, version: int | None = None, db: Session = Depends(session), user=Depends(owner)):
+    transaction_owned(db, transaction_id, user)
+    if version is None:
+        raise HTTPException(428, 'Supply the current transaction version before deleting')
+    result = db.execute(delete(Transaction).where(Transaction.id == transaction_id, Transaction.user_id == user, Transaction.version == version))
+    if result.rowcount != 1:
+        db.rollback()
+        raise HTTPException(409, 'Transaction changed; reload before deleting')
+    db.add(AuthEvent(event='transaction_deleted', user_id=user, occurred_at=now()))
     db.commit()
 
 @app.post('/api/v1/budgets', status_code=201)
 def save_budget(body: BudgetInput, db: Session = Depends(session), user=Depends(owner)):
     row = db.scalar(select(Budget).where(Budget.user_id == user, Budget.month == body.month, Budget.category == body.category))
     if row is None:
-        row = Budget(user_id=user, month=body.month, category=body.category)
+        if body.version is not None:
+            raise HTTPException(409, 'Budget no longer exists; reload')
+        row = Budget(user_id=user, month=body.month, category=body.category, limit_minor=minor(body.amount))
         db.add(row)
-    row.limit_minor = minor(body.amount)
+    else:
+        if body.version is None:
+            raise HTTPException(428, 'Supply the current budget version before updating')
+        result = db.execute(update(Budget).where(Budget.id == row.id, Budget.user_id == user, Budget.version == body.version).values(limit_minor=minor(body.amount), version=Budget.version + 1))
+        if result.rowcount != 1:
+            db.rollback()
+            raise HTTPException(409, 'Budget changed; reload before editing')
+    db.add(AuthEvent(event='budget_saved', user_id=user, occurred_at=now()))
     try:
         db.commit()
     except IntegrityError:
         db.rollback()
-        raise HTTPException(409, 'Budget changed concurrently; retry')
+        raise HTTPException(409, 'Budget changed concurrently; reload')
     db.refresh(row)
     return dump(row)
 
@@ -235,6 +250,7 @@ async def confirm(account_id: int = Form(...), digest: str = Form(...), acknowle
     try:
         db.flush()
         db.add_all([Transaction(user_id=user, account_id=account_id, **row) for row in rows])
+        db.add(AuthEvent(event='import_confirmed', user_id=user, occurred_at=now()))
         db.commit()
     except IntegrityError:
         db.rollback()

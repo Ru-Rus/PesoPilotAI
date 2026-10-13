@@ -1,6 +1,6 @@
 from datetime import date, datetime
 from uuid import uuid4
-from sqlalchemy import Boolean, BigInteger, Date, DateTime, ForeignKey, ForeignKeyConstraint, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import CheckConstraint, Boolean, BigInteger, Date, DateTime, ForeignKey, ForeignKeyConstraint, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 from .db import Base
 
@@ -43,7 +43,7 @@ class RateBucket(Base):
 
 class Account(Base):
     __tablename__ = 'financial_accounts'
-    __table_args__ = (UniqueConstraint('id', 'user_id', name='uq_account_owner'),)
+    __table_args__ = (UniqueConstraint('id', 'user_id', name='uq_account_owner'), CheckConstraint('opening_minor >= 0 AND opening_minor <= 100000000000', name='ck_account_opening'), CheckConstraint("kind IN ('cash', 'bank', 'ewallet')", name='ck_account_kind'), CheckConstraint('version >= 1', name='ck_account_version'))
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[str] = mapped_column(ForeignKey('users.id'), index=True)
     name: Mapped[str] = mapped_column(String(80))
@@ -55,7 +55,7 @@ class Account(Base):
 
 class Transaction(Base):
     __tablename__ = 'transactions'
-    __table_args__ = (Index('ix_transactions_owner_date', 'user_id', 'occurred_at'), ForeignKeyConstraint(['account_id', 'user_id'], ['financial_accounts.id', 'financial_accounts.user_id'], name='fk_transaction_account_owner'))
+    __table_args__ = (CheckConstraint('amount_minor > 0 AND amount_minor <= 100000000000', name='ck_transaction_amount'), CheckConstraint("kind IN ('income', 'expense')", name='ck_transaction_kind'), CheckConstraint('version >= 1', name='ck_transaction_version'), Index('ix_transactions_owner_account_page', 'user_id', 'account_id', 'occurred_at', 'id'), Index('ix_transactions_owner_date', 'user_id', 'occurred_at'), ForeignKeyConstraint(['account_id', 'user_id'], ['financial_accounts.id', 'financial_accounts.user_id'], name='fk_transaction_account_owner'))
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[str] = mapped_column(ForeignKey('users.id'))
     account_id: Mapped[int] = mapped_column(ForeignKey('financial_accounts.id'))
@@ -68,12 +68,13 @@ class Transaction(Base):
 
 class Budget(Base):
     __tablename__ = 'budgets'
-    __table_args__ = (UniqueConstraint('user_id', 'month', 'category'),)
+    __table_args__ = (UniqueConstraint('user_id', 'month', 'category'), CheckConstraint('limit_minor > 0 AND limit_minor <= 100000000000', name='ck_budget_limit'), CheckConstraint('version >= 1', name='ck_budget_version'))
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[str] = mapped_column(ForeignKey('users.id'))
     month: Mapped[str] = mapped_column(String(7))
     category: Mapped[str] = mapped_column(String(40))
     limit_minor: Mapped[int] = mapped_column(BigInteger)
+    version: Mapped[int] = mapped_column(Integer, default=1)
 
 class ImportBatch(Base):
     __tablename__ = 'import_batches'

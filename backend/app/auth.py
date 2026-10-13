@@ -11,8 +11,8 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode
 from authlib.integrations.starlette_client import OAuth
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import JSONResponse, RedirectResponse
-from sqlalchemy import delete, select, update
+from fastapi.responses import JSONResponse, RedirectResponse, Response
+from sqlalchemy import case, delete, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from .db import session, settings
@@ -86,20 +86,31 @@ def authenticated(request: Request, db: Session = Depends(session)):
         db.commit()
         event(db, 'session_expired', user_id)
         raise HTTPException(401, 'Session expired; sign in again')
+    # Keep a read-only identity snapshot across rate-limit commits. A concurrent
+    # revocation must produce 401 at the conditional touch, not an ORM reload error.
+    db.expunge(row)
     rate_limit(db, 'user:' + row.user_id, settings.api_limit)
     if request.method not in ('GET', 'HEAD', 'OPTIONS'):
         csrf = request.headers.get('X-CSRF-Token', '')
         if request.headers.get('origin') != settings.frontend_url.rstrip('/') or not secrets.compare_digest(csrf, row.csrf_token):
             event(db, 'csrf_rejected', row.user_id)
             raise HTTPException(403, 'Invalid request origin or CSRF token')
-    row.last_seen_at = timestamp
+    # Conditional update handles a logout/revocation between reading and touching
+    # this session. It cannot recreate a deleted row or move last_seen backwards.
+    result = db.execute(update(AuthSession).where(
+        AuthSession.token_hash == row.token_hash,
+        AuthSession.expires_at > timestamp,
+        AuthSession.last_seen_at > timestamp - timedelta(seconds=settings.session_idle_seconds),
+    ).values(last_seen_at=case((AuthSession.last_seen_at < timestamp, timestamp), else_=AuthSession.last_seen_at)), execution_options={'synchronize_session': False})
     db.commit()
+    if result.rowcount != 1:
+        raise HTTPException(401, 'Session expired or revoked; sign in again')
     return row
 
 def owner(row: AuthSession = Depends(authenticated)):
     return row.user_id
 
-def issue_session(db, user_id, response, previous_token=''):
+def issue_session(db, user_id, response, previous_token=None):
     db.execute(delete(AuthSession).where(AuthSession.expires_at < now()))
     if previous_token:
         db.execute(delete(AuthSession).where(AuthSession.token_hash == digest(previous_token)))
@@ -186,6 +197,31 @@ def me(row: AuthSession = Depends(authenticated), db: Session = Depends(session)
     user = db.get(User, row.user_id)
     return JSONResponse({'id': user.id, 'name': user.display_name, 'csrf_token': row.csrf_token}, headers={'Cache-Control': 'no-store'})
 
+@router.get('/sessions')
+def sessions(row: AuthSession = Depends(authenticated), db: Session = Depends(session)):
+    timestamp = now()
+    rows = db.scalars(select(AuthSession).where(AuthSession.user_id == row.user_id,
+        AuthSession.expires_at > timestamp,
+        AuthSession.last_seen_at > timestamp - timedelta(seconds=settings.session_idle_seconds)).order_by(AuthSession.created_at.desc())).all()
+    # IDs are non-authenticating one-way hashes, never cookie or CSRF values.
+    return [{'id': item.token_hash, 'current': item.token_hash == row.token_hash,
+        'created_at': item.created_at.isoformat() + 'Z', 'expires_at': item.expires_at.isoformat() + 'Z',
+        'last_seen_at': item.last_seen_at.isoformat() + 'Z'} for item in rows]
+
+@router.delete('/sessions/{session_id}', status_code=204)
+def revoke_session(session_id: str, row: AuthSession = Depends(authenticated), db: Session = Depends(session)):
+    result = db.execute(delete(AuthSession).where(AuthSession.token_hash == session_id, AuthSession.user_id == row.user_id))
+    if result.rowcount != 1:
+        db.rollback()
+        event(db, 'authorization_denied', row.user_id)
+        raise HTTPException(404, 'Session not found')
+    db.add(AuthEvent(event='session_revoked', user_id=row.user_id, occurred_at=now()))
+    db.commit()
+    response = Response(status_code=204)
+    if session_id == row.token_hash:
+        clear_cookie(response, SESSION_COOKIE)
+    return response
+
 @router.post('/logout')
 async def logout(row: AuthSession = Depends(authenticated), db: Session = Depends(session)):
     user_id = row.user_id
@@ -200,7 +236,7 @@ async def logout(row: AuthSession = Depends(authenticated), db: Session = Depend
         if endpoint:
             logout_url = endpoint + '?' + urlencode({'client_id': settings.oidc_client_id, 'post_logout_redirect_uri': settings.frontend_url})
     except Exception:
-        pass
+        event(db, 'provider_logout_unavailable', user_id)
     response = JSONResponse({'logout_url': logout_url}, headers={'Cache-Control': 'no-store'})
     clear_cookie(response, SESSION_COOKIE)
     clear_cookie(response, FLOW_COOKIE)

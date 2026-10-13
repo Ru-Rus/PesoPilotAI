@@ -12,13 +12,13 @@ PHP personal finance app with separate `frontend` (Next.js + TypeScript) and `ba
 - CSRF token plus exact Origin checks on protected writes; user-scoped authorization on every finance endpoint; database ownership constraints.
 - SQL Server rate limits shared across app workers and authentication event records without passwords, tokens or financial details.
 
-This is an authenticated development application. Account edit/archive/restore, version-protected transaction editing, cursor pagination, and SQL aggregate dashboards are implemented. Transfers/refunds, AI, export/deletion, browser E2E, monitoring and production hardening remain roadmap work. See [current development status](MD/Development_Status.md).
+This is an authenticated development application. Account edit/archive/restore, version-protected transaction/budget edits and deletes, cursor pagination, SQL aggregate dashboards, and self-service session management are implemented. Transfers/refunds, AI, export/deletion, browser E2E, monitoring and production hardening remain roadmap work. See [current development status](MD/Engineering_Status.md).
 
-Before starting an existing checkout after pulling these changes, stop the API, run `.venv/Scripts/python.exe -m alembic upgrade head` from `backend`, then restart it. Migration `0003` adds archive flags and edit versions without removing finance records. The configured workspace database was upgraded successfully.
+Before starting an existing checkout after pulling these changes, stop the API, run `.venv/Scripts/python.exe -m alembic upgrade head` from `backend`, then restart it. Migration `0004` adds budget versions, finance check constraints and a pagination index without removing finance records. Existing invalid rows cause constraint validation to fail rather than being rewritten. The configured workspace database was upgraded successfully.
 
 ## Start on this workspace
 
-The Python virtual environment, ignored `backend/.env`, database migrations through `0002`, workspace-local Java/Keycloak runtimes, and local HTTPS certificate are already configured. Do not overwrite the existing `.env`. Restart any old backend process so it reads the updated configuration.
+The Python virtual environment, ignored `backend/.env`, database migrations through `0004`, workspace-local Java/Keycloak runtimes, and local HTTPS certificate are already configured. Do not overwrite the existing `.env`. Restart any old backend process so it reads the updated configuration.
 
 Run these in three terminals from the project root:
 
@@ -92,10 +92,18 @@ npm.cmd run typecheck
 npm.cmd run build
 ```
 
-Current checks: 49 backend tests; SQL Server migration `0003`; real SQL Server authorization/account/import/budget/reconciliation/edit/archive/pagination smoke; previously verified real Keycloak login/logout including the HTTPS frontend proxy (not rerun for this change); frontend production build and TypeScript check. Test provider accounts and finance smoke rows were removed. Browser interaction and accessibility audits are still pending.
+Current checks: 73 backend tests; SQL Server migration `0004`; real SQL Server authorization/account/import/budget/reconciliation/edit/archive/pagination smoke; previously verified real Keycloak login/logout including the HTTPS frontend proxy (not rerun for this change); frontend production build and TypeScript check. Test provider accounts and finance smoke rows were removed. Browser interaction and accessibility audits are still pending.
 
 The default fixed-window limits are 10 authentication/anonymous attempts and 120 authenticated requests per 60 seconds. Authentication uses the connection's IP address, ignoring untrusted forwarded headers; behind the frontend proxy it conservatively shares an authentication bucket. Review trusted-proxy client-IP handling before hosting a public service. `auth_events` records login, logout, expiry, rejected requests and rate-limit events. Production retention, alerting and provider back-channel logout are not implemented.
 
 SQLAlchemy 2.0.40 still warns about the installed SQL Server 17.0 version; tested workflows passed. Windows Application Control blocked the newer binary previously attempted. Resolve this compatibility warning before deployment. Configure MFA/passkeys, registration policy, SMTP, provider backups and operational controls before processing real users' data.
 
 References: [Authlib Starlette OIDC](https://docs.authlib.org/en/v1.6.9/client/starlette.html), [Keycloak local setup](https://www.keycloak.org/getting-started/getting-started-zip), [roadmap](MD/PesoPilot_AI_Production_Roadmap.md), [status and history](MD/Quick_Wins_Status.md).
+
+## Engineering hardening update
+
+Read the [annotated engineering prompt](MD/AI_ENGINEERING_PROMPT.md), [audit](MD/Engineering_Audit.md), [verified status](MD/Engineering_Status.md), and [architecture](docs/ARCHITECTURE.md). Detailed API/version contracts are in [docs/API.md](docs/API.md).
+
+Install backend dependencies with `python -m pip install -r requirements-dev.txt` in the project environment before running the expanded suite. Migration head is **0004**. Existing-budget updates and transaction deletes now require the current version; the bundled UI supplies it and reloads after conflicts. Sessions can be reviewed and revoked in the Sessions tab.
+
+Security additions include bounded 2 MB total write bodies, sanitized validation/database errors, request IDs, production transport checks, and dynamic nonce CSP. `APP_ENV=production` requires HTTPS OIDC and explicit verified SQL Server TLS; this does not provision production infrastructure. Run `smoke_concurrency.py` only against development/staging synthetic data. Current evidence and remaining release blockers are in the status report. No hosted AI integration or production deployment is configured.

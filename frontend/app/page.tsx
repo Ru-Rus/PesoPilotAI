@@ -1,5 +1,6 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
+import SessionPanel from "./session-panel";
 
 type Account = {
   id: number;
@@ -30,6 +31,7 @@ type Summary = {
     category: string;
     limit_minor: number;
     spent_minor: number;
+    version: number;
   }[];
 };
 type Preview = {
@@ -160,7 +162,13 @@ export default function Dashboard() {
       setNotice(message);
       await reload();
     } catch (e) {
-      setError((e as Error).message);
+      if (e instanceof APIError && [409, 428].includes(e.status)) {
+        setEditing(null);
+        await reload();
+        setError(
+          `${e.message}. Current values have been loaded; review them before trying again.`,
+        );
+      } else setError((e as Error).message);
       if (e instanceof APIError && e.status === 401) {
         csrfToken = "";
         setUser(null);
@@ -290,6 +298,7 @@ export default function Dashboard() {
             "Accounts",
             "Budgets",
             "CSV import",
+            "Sessions",
           ].map((name, i) => (
             <button
               key={name}
@@ -610,6 +619,9 @@ export default function Dashboard() {
                         category: d.get("category"),
                         kind: d.get("kind"),
                         amount: d.get("amount"),
+                        version: summary?.budgets.find(
+                          (b) => b.category === d.get("category"),
+                        )?.version,
                       }),
                       method: editing ? "PATCH" : "POST",
                     },
@@ -766,9 +778,12 @@ export default function Dashboard() {
                                 if (window.confirm("Delete this transaction?"))
                                   void action(
                                     () =>
-                                      api(`transactions/${t.id}`, {
-                                        method: "DELETE",
-                                      }),
+                                      api(
+                                        `transactions/${t.id}?version=${t.version}`,
+                                        {
+                                          method: "DELETE",
+                                        },
+                                      ),
                                     "Transaction deleted.",
                                   );
                               }}
@@ -796,6 +811,7 @@ export default function Dashboard() {
             Load older transactions
           </button>
         )}
+        {tab === "Sessions" && <SessionPanel request={api} onChange={reload} />}
         {tab === "Budgets" && (
           <section className="card">
             <h2>Monthly budgets</h2>
@@ -812,6 +828,9 @@ export default function Dashboard() {
                         month,
                         category: d.get("category"),
                         amount: d.get("amount"),
+                        version: summary?.budgets.find(
+                          (b) => b.category === d.get("category"),
+                        )?.version,
                       }),
                     ),
                   "Budget saved.",

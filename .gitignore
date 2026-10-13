@@ -13,3 +13,9 @@ certificates/
 MD/
 backend/keycloak/data/
 pytest-cache-files-*/
+
+.coverage
+coverage.xml
+.hypothesis/
+frontend-build.tgz
+frontend-smoke.log

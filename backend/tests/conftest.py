@@ -9,7 +9,7 @@ from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 from fastapi.responses import Response
-from app.auth import SESSION_COOKIE, issue_session, now
+from app.auth import issue_session, now
 from app.db import Base, session, settings
 from app.main import app
 from app.models import Account, User

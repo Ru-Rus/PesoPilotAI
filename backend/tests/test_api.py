@@ -38,7 +38,7 @@ def test_owner_isolation(client):
     sign_in(c, factory, 'bob')
     assert c.get('/api/v1/accounts').json()[0]['name'] == 'Private'
     assert c.get('/api/v1/transactions').json()[0]['id'] == tid
-    assert c.delete(f'/api/v1/transactions/{tid}').status_code == 204
+    assert c.delete(f'/api/v1/transactions/{tid}?version=1').status_code == 204
 
 def test_budget_isolation(client):
     c, factory = client

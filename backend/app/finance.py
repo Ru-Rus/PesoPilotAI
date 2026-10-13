@@ -1,18 +1,19 @@
 import csv
 import io
+import re
 from datetime import date
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 
 CATEGORIES = ['Food & dining', 'Transport', 'Shopping', 'Bills', 'Health', 'Entertainment', 'Income', 'Other']
 
 def minor(value: str) -> int:
-    try:
-        amount = Decimal(value)
-        if not amount.is_finite() or amount <= 0 or amount > Decimal('1000000000') or amount * 100 != (amount * 100).to_integral_value():
-            raise ValueError('Amount must be positive, at most one billion pesos, with at most two decimal places')
-        return int(amount * 100)
-    except InvalidOperation as exc:
-        raise ValueError('Invalid peso amount') from exc
+    # Bound inputs before Decimal parsing; reject exponent notation and rounding.
+    if not isinstance(value, str) or len(value) > 32 or not re.fullmatch(r'[0-9]+(?:\.[0-9]{1,2})?', value.strip()):
+        raise ValueError('Amount must be a decimal peso value with at most two decimal places')
+    amount = Decimal(value.strip())
+    if amount <= 0 or amount > Decimal('1000000000'):
+        raise ValueError('Amount must be positive and at most one billion pesos')
+    return int(amount * 100)
 
 def parse_csv(content: bytes) -> list[dict]:
     if len(content) > 1_000_000:
