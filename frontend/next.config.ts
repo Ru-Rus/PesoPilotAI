@@ -1,3 +1,7 @@
 import type { NextConfig } from 'next';
-const config: NextConfig = { async rewrites() { return [{ source: '/api/:path*', destination: `${process.env.API_URL || 'http://127.0.0.1:8000'}/api/:path*` }]; } };
+const config: NextConfig = {
+  // Authorization callback query strings contain short-lived credentials.
+  logging: { incomingRequests: false },
+  async rewrites() { return [{ source: '/api/:path*', destination: `${process.env.API_URL || 'http://127.0.0.1:8000'}/api/:path*` }]; },
+};
 export default config;

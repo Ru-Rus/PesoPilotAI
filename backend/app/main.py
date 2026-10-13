@@ -2,33 +2,42 @@ import hashlib
 from datetime import date
 from typing import Literal
 from fastapi import Depends, FastAPI, HTTPException, UploadFile, File, Form
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
-from .db import session, settings
+from .db import session
+from .auth import event, owner, router as auth_router
 from .models import Account, Transaction, Budget, ImportBatch
 from .finance import CATEGORIES, minor, parse_csv
 
 app = FastAPI(title='PesoPilot API', version='0.1.0')
+app.include_router(auth_router, prefix='/api/v1/auth')
 
-def owner():
-    if not settings.demo_mode:
-        raise HTTPException(401, 'Authentication is not configured. Local synthetic demo requires DEMO_MODE=true.')
-    return 'local-synthetic-demo'
+@app.middleware('http')
+async def privacy_headers(request, call_next):
+    response = await call_next(request)
+    response.headers['Cache-Control'] = 'no-store'
+    response.headers['Referrer-Policy'] = 'no-referrer'
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    return response
 
 def account_owned(db, account_id, user):
     account = db.scalar(select(Account).where(Account.id == account_id, Account.user_id == user))
     if not account:
+        event(db, 'authorization_denied', user)
         raise HTTPException(404, 'Account not found')
     return account
 
-class AccountInput(BaseModel):
+class Input(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+
+class AccountInput(Input):
     name: str = Field(min_length=1, max_length=80)
     kind: Literal['cash', 'bank', 'ewallet']
     opening_minor: int = Field(default=0, ge=0, le=100_000_000_000)
 
-class TransactionInput(BaseModel):
+class TransactionInput(Input):
     account_id: int = Field(gt=0)
     occurred_at: date
     description: str = Field(min_length=1, max_length=160)
@@ -49,7 +58,7 @@ class TransactionInput(BaseModel):
         minor(value)
         return value
 
-class BudgetInput(BaseModel):
+class BudgetInput(Input):
     month: str = Field(pattern=r'^\d{4}-(0[1-9]|1[0-2])$')
     category: str
     amount: str
@@ -104,6 +113,7 @@ def add_transaction(body: TransactionInput, db: Session = Depends(session), user
 def delete_transaction(transaction_id: int, db: Session = Depends(session), user=Depends(owner)):
     row = db.scalar(select(Transaction).where(Transaction.id == transaction_id, Transaction.user_id == user))
     if row is None:
+        event(db, 'authorization_denied', user)
         raise HTTPException(404, 'Transaction not found')
     db.delete(row)
     db.commit()

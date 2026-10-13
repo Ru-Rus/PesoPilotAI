@@ -10,3 +10,6 @@ __pycache__/
 .npm-cache/
 *.tsbuildinfo
 MD/
+certificates/
+backend/keycloak/data/
+pytest-cache-files-*/

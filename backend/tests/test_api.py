@@ -1,36 +1,13 @@
-import os
-os.environ['DATABASE_URL'] = 'sqlite://'
-os.environ['DEMO_MODE'] = 'true'
-
+from datetime import date
 import pytest
-from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, select
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
-from app.db import Base, session, settings
-from app.main import app
-from app.models import Account, Transaction
-
-@pytest.fixture
-def client():
-    engine = create_engine('sqlite://', connect_args={'check_same_thread': False}, poolclass=StaticPool)
-    Base.metadata.create_all(engine)
-    factory = sessionmaker(engine)
-    def override():
-        with factory() as db:
-            yield db
-    app.dependency_overrides[session] = override
-    with factory() as db:
-        db.add(Account(user_id='another-owner', name='Private', kind='bank', opening_minor=0))
-        db.commit()
-    with TestClient(app) as test:
-        yield test, factory
-    app.dependency_overrides.clear()
-    engine.dispose()
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
+from app.models import Transaction
+from conftest import sign_in
 
 def create_account(c):
     result = c.post('/api/v1/accounts', json={'name': 'Demo', 'kind': 'cash'})
-    assert result.status_code == 201
+    assert result.status_code == 201, result.text
     return result.json()['id']
 
 def test_reconciliation_and_budget(client):
@@ -46,34 +23,61 @@ def test_reconciliation_and_budget(client):
     assert c.get('/api/v1/accounts').json()[0]['balance_minor'] == 9997
     assert c.get('/api/v1/analytics/summary?month=bad').status_code == 422
 
-def test_owner_isolation_and_fail_closed(client):
+def test_owner_isolation(client):
     c, factory = client
     assert c.get('/api/v1/accounts').json() == []
     assert c.post('/api/v1/transactions', json={'account_id': 1, 'occurred_at': '2026-10-01', 'description': 'No', 'category': 'Other', 'kind': 'expense', 'amount': '1.00'}).status_code == 404
     with factory() as db:
-        t = Transaction(user_id='another-owner', account_id=1, occurred_at=__import__('datetime').date(2026, 10, 1), description='Private', category='Other', kind='expense', amount_minor=100)
+        t = Transaction(user_id='bob', account_id=1, occurred_at=date(2026, 10, 1), description='Private', category='Other', kind='expense', amount_minor=100)
         db.add(t)
         db.commit()
         tid = t.id
     assert c.get('/api/v1/transactions').json() == []
     assert c.delete(f'/api/v1/transactions/{tid}').status_code == 404
-    previous = settings.demo_mode
-    settings.demo_mode = False
-    try:
-        assert c.get('/api/v1/accounts').status_code == 401
-    finally:
-        settings.demo_mode = previous
+    assert c.get('/api/v1/analytics/summary?month=2026-10').json()['expense_minor'] == 0
+    sign_in(c, factory, 'bob')
+    assert c.get('/api/v1/accounts').json()[0]['name'] == 'Private'
+    assert c.get('/api/v1/transactions').json()[0]['id'] == tid
+    assert c.delete(f'/api/v1/transactions/{tid}').status_code == 204
+
+def test_budget_isolation(client):
+    c, factory = client
+    body = {'month': '2026-10', 'category': 'Other', 'amount': '12.00'}
+    assert c.post('/api/v1/budgets', json=body).status_code == 201
+    sign_in(c, factory, 'bob')
+    assert c.get('/api/v1/analytics/summary?month=2026-10').json()['budgets'] == []
+    assert c.post('/api/v1/budgets', json={**body, 'amount': '99.00'}).status_code == 201
+    sign_in(c, factory, 'alice')
+    assert c.get('/api/v1/analytics/summary?month=2026-10').json()['budgets'][0]['limit_minor'] == 1200
+
+CSV = b'date,description,category,kind,amount\n2026-10-01,Coffee,Food & dining,expense,1.25\n'
+FILES = {'file': ('sample.csv', CSV, 'text/csv')}
 
 def test_import_atomic_repeat_protection(client):
     c, factory = client
     account = create_account(c)
-    content = b'date,description,category,kind,amount\n2026-10-01,Coffee,Food & dining,expense,1.25\n'
-    files = {'file': ('sample.csv', content, 'text/csv')}
-    preview = c.post('/api/v1/imports/preview', data={'account_id': account}, files=files).json()
+    preview = c.post('/api/v1/imports/preview', data={'account_id': account}, files=FILES).json()
     assert c.get('/api/v1/transactions').json() == []
     data = {'account_id': account, 'digest': preview['digest'], 'acknowledge_duplicates': 'true'}
-    assert c.post('/api/v1/imports/confirm', data={**data, 'digest': 'wrong'}, files=files).status_code == 409
-    assert c.post('/api/v1/imports/confirm', data=data, files=files).status_code == 200
-    assert c.post('/api/v1/imports/confirm', data=data, files=files).status_code == 409
+    assert c.post('/api/v1/imports/confirm', data={**data, 'digest': 'wrong'}, files=FILES).status_code == 409
+    assert c.post('/api/v1/imports/confirm', data=data, files=FILES).status_code == 200
+    assert c.post('/api/v1/imports/confirm', data=data, files=FILES).status_code == 409
     with factory() as db:
         assert len(db.scalars(select(Transaction)).all()) == 1
+    sign_in(c, factory, 'bob')
+    assert c.post('/api/v1/imports/preview', data={'account_id': account}, files=FILES).status_code == 404
+    assert c.post('/api/v1/imports/confirm', data=data, files=FILES).status_code == 404
+    preview = c.post('/api/v1/imports/preview', data={'account_id': 1}, files=FILES).json()
+    assert not preview['already_imported']
+    assert c.post('/api/v1/imports/confirm', data={**data, 'account_id': 1}, files=FILES).status_code == 200
+
+def test_mass_assignment_denied(client):
+    c, _ = client
+    assert c.post('/api/v1/accounts', json={'name': 'No', 'kind': 'cash', 'user_id': 'bob'}).status_code == 422
+
+def test_database_enforces_account_owner(client):
+    _, factory = client
+    with factory() as db:
+        db.add(Transaction(user_id='alice', account_id=1, occurred_at=date(2026, 10, 1), description='Invalid ownership', category='Other', kind='expense', amount_minor=100))
+        with pytest.raises(IntegrityError):
+            db.commit()

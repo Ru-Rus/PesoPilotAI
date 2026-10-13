@@ -1,5 +1,5 @@
 'use client';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 type Account = { id: number; name: string; kind: string; balance_minor: number };
 type Transaction = { id: number; account_id: number; occurred_at: string; description: string; category: string; kind: string; amount_minor: number };
@@ -7,13 +7,19 @@ type Summary = { income_minor: number; expense_minor: number; net_minor: number;
 type Preview = { digest: string; already_imported: boolean; duplicate_candidates: number; count: number; rows: Transaction[] };
 const categories = ['Food & dining', 'Transport', 'Shopping', 'Bills', 'Health', 'Entertainment', 'Income', 'Other'];
 const money = (n: number) => new Intl.NumberFormat('en-PH', { style: 'currency', currency: 'PHP' }).format(n / 100);
+let csrfToken = '';
+class APIError extends Error { constructor(message: string, public status: number) { super(message); } }
 async function api(path: string, init?: RequestInit) {
-  const response = await fetch('/api/v1/' + path, init);
-  if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(typeof body.detail === 'string' ? body.detail : `Request failed (${response.status}). Check your input and backend connection.`); }
+  const headers = new Headers(init?.headers);
+  if (init?.method && !['GET', 'HEAD'].includes(init.method)) headers.set('X-CSRF-Token', csrfToken);
+  const response = await fetch('/api/v1/' + path, { ...init, headers, credentials: 'same-origin', cache: 'no-store' });
+  if (!response.ok) { const body = await response.json().catch(() => ({})); throw new APIError(typeof body.detail === 'string' ? body.detail : `Request failed (${response.status}). Check your input and backend connection.`, response.status); }
   return response.status === 204 ? null : response.json();
 }
 const json = (body: unknown) => ({ method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
 export default function Dashboard() {
+  const requestGeneration = useRef(0);
+  const [user, setUser] = useState<{ id: string; name: string } | null>(null);
   const [tab, setTab] = useState('Overview');
   const [month, setMonth] = useState(() => { const parts = new Intl.DateTimeFormat('en', { timeZone: 'Asia/Manila', year: 'numeric', month: '2-digit' }).formatToParts(new Date()); return `${parts.find(p => p.type === 'year')!.value}-${parts.find(p => p.type === 'month')!.value}`; });
   const [accounts, setAccounts] = useState<Account[]>([]);
@@ -22,18 +28,21 @@ export default function Dashboard() {
   const [error, setError] = useState(''); const [loading, setLoading] = useState(true); const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState(''); const [file, setFile] = useState<File | null>(null); const [preview, setPreview] = useState<Preview | null>(null); const [importAccount, setImportAccount] = useState(''); const [ack, setAck] = useState(false);
   const reload = useCallback(async () => {
+    const generation = ++requestGeneration.current;
     setLoading(true); setError('');
-    try { const [a, t, s] = await Promise.all([api('accounts'), api('transactions?limit=100'), api(`analytics/summary?month=${month}`)]); setAccounts(a); setTransactions(t); setSummary(s); }
-    catch (e) { setError((e as Error).message); } finally { setLoading(false); }
+    try { const identity = await api('auth/me'); if (generation !== requestGeneration.current) return; csrfToken = identity.csrf_token; setUser(identity); const [a, t, s] = await Promise.all([api('accounts'), api('transactions?limit=100'), api(`analytics/summary?month=${month}`)]); if (generation !== requestGeneration.current) return; setAccounts(a); setTransactions(t); setSummary(s); }
+    catch (e) { if (generation !== requestGeneration.current) return; if (e instanceof APIError && e.status === 401) { csrfToken = ''; setUser(null); setAccounts([]); setTransactions([]); setSummary(null); setPreview(null); } else setError((e as Error).message); } finally { if (generation === requestGeneration.current) setLoading(false); }
   }, [month]);
   useEffect(() => { void reload(); }, [reload]);
-  async function action(fn: () => Promise<unknown>, message: string) { setBusy(true); setError(''); setNotice(''); try { await fn(); setNotice(message); await reload(); } catch (e) { setError((e as Error).message); } finally { setBusy(false); } }
+  async function action(fn: () => Promise<unknown>, message: string) { setBusy(true); setError(''); setNotice(''); try { await fn(); setNotice(message); await reload(); } catch (e) { setError((e as Error).message); if (e instanceof APIError && e.status === 401) { csrfToken = ''; setUser(null); setAccounts([]); setTransactions([]); setSummary(null); setPreview(null); } } finally { setBusy(false); } }
+  async function logout() { ++requestGeneration.current; setBusy(true); setLoading(false); try { const result = await api('auth/logout', { method: 'POST' }); csrfToken = ''; setUser(null); setAccounts([]); setTransactions([]); setSummary(null); setPreview(null); setNotice(''); if (result.logout_url) window.location.assign(result.logout_url); } catch (e) { setError((e as Error).message); await reload(); } finally { setBusy(false); } }
   const total = accounts.reduce((sum, a) => sum + a.balance_minor, 0);
   const expenseCategories = Object.entries(summary?.categories || {}).filter(([, n]) => n > 0).sort((a, b) => b[1] - a[1]);
   const accountSelect = <label>Account<select name="account_id" required defaultValue=""><option value="" disabled>Select an account</option>{accounts.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}</select></label>;
-  return <div className="shell"><aside><a className="brand" href="/">◈ <span>PesoPilot<small>PERSONAL FINANCE</small></span></a><div className="workspace">Your workspace <span>LOCAL DEMO</span></div><nav aria-label="Main navigation">{['Overview', 'Transactions', 'Accounts', 'Budgets', 'CSV import'].map((name, i) => <button key={name} className={tab === name ? 'active' : ''} onClick={() => setTab(name)}><span>{['◫', '⇄', '▤', '◎', '↥'][i]}</span>{name}</button>)}</nav><div className="aside-note"><span className="spark">✦</span><strong>A little clarity goes a long way.</strong><p>Build better money habits, one transaction at a time.</p></div><div className="profile"><div className="avatar">D</div><div>Demo workspace<small>Synthetic data only</small></div></div></aside>
+  if (!user) return <main className="login-page"><section className="card login-card"><a className="brand" href="/">◈ <span>PesoPilot<small>PERSONAL FINANCE</small></span></a><h1>Your money, in your hands.</h1><p>Sign in to your private finance workspace.</p>{loading ? <p role="status">Checking your session…</p> : <a className="login-button" href="/api/v1/auth/login">Sign in with Keycloak →</a>}{error && <p className="error" role="alert">{error}</p>}<p className="login-note">Manage your credentials with Keycloak. Your accounts, budgets, and transactions belong to you.</p></section></main>;
+  return <div className="shell"><aside><a className="brand" href="/">◈ <span>PesoPilot<small>PERSONAL FINANCE</small></span></a><div className="workspace">Your workspace <span>PRIVATE ACCOUNT</span></div><nav aria-label="Main navigation">{['Overview', 'Transactions', 'Accounts', 'Budgets', 'CSV import'].map((name, i) => <button key={name} className={tab === name ? 'active' : ''} onClick={() => setTab(name)}><span>{['◫', '⇄', '▤', '◎', '↥'][i]}</span>{name}</button>)}</nav><div className="aside-note"><span className="spark">✦</span><strong>A little clarity goes a long way.</strong><p>Build better money habits, one transaction at a time.</p></div><div className="profile"><div className="avatar">{user.name.slice(0, 1)}</div><div>{user.name}<small>Private workspace</small><button className="text-button" disabled={busy} onClick={() => void logout()}>Sign out</button></div></div></aside>
   <main><header><div><div className="eyebrow">YOUR MONEY, IN FOCUS</div><h1>{tab === 'Overview' ? 'A clearer picture of your finances.' : tab}</h1><p>Track what comes in, understand what goes out.</p></div><label className="month">Reporting month<input aria-label="Reporting month" type="month" value={month} onChange={e => setMonth(e.target.value)} required /></label></header>
-  <div className="demo-banner"><span>◉</span> Local demo · PHP accounts · Connect your SQL Server backend to begin.</div>
+  <div className="demo-banner"><span>◉</span> Your private workspace · PHP accounts</div><button className="mobile-logout text-button" disabled={busy} onClick={() => void logout()}>Sign out · {user.name}</button>
   {error && <div role="alert" className="error">{error}<button onClick={() => void reload()} disabled={busy}>Retry connection</button></div>}{notice && <div role="status" className="notice">{notice}</div>}
   {loading && <p role="status">Loading your workspace…</p>}
   {tab === 'Overview' && <><section className="stats" aria-label="Monthly totals">{[['Total balance', total, 'Across your accounts'], ['Income', summary?.income_minor || 0, 'This reporting month'], ['Expenses', summary?.expense_minor || 0, 'This reporting month'], ['Net cash flow', summary?.net_minor || 0, 'Income minus expenses']].map(([label, amount, hint], i) => <article className={'stat stat-' + i} key={String(label)}><div>{label}<span>{['▤', '↙', '↗', '⇄'][i]}</span></div><strong>{summary ? money(Number(amount)) : '—'}</strong><small>{hint}</small></article>)}</section>

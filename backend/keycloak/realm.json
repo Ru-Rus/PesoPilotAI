@@ -1,0 +1,24 @@
+{
+  "realm": "pesopilot",
+  "enabled": true,
+  "registrationAllowed": true,
+  "resetPasswordAllowed": false,
+  "bruteForceProtected": true,
+  "loginWithEmailAllowed": false,
+  "clients": [{
+    "clientId": "pesopilot",
+    "name": "PesoPilot local development",
+    "enabled": true,
+    "protocol": "openid-connect",
+    "publicClient": false,
+    "standardFlowEnabled": true,
+    "implicitFlowEnabled": false,
+    "directAccessGrantsEnabled": false,
+    "redirectUris": ["https://localhost:3010/api/v1/auth/callback"],
+    "webOrigins": ["https://localhost:3010"],
+    "attributes": {
+      "pkce.code.challenge.method": "S256",
+      "post.logout.redirect.uris": "https://localhost:3010"
+    }
+  }]
+}
