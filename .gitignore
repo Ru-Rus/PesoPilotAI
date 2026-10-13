@@ -9,7 +9,7 @@ __pycache__/
 .tools/
 .npm-cache/
 *.tsbuildinfo
-MD/
 certificates/
+MD/
 backend/keycloak/data/
 pytest-cache-files-*/
