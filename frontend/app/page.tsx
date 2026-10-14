@@ -1,6 +1,9 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
 import SessionPanel from "./session-panel";
+import IntelligencePanel, { CategorySuggestion } from "./intelligence-panel";
+import PrivacyPanel from "./privacy-panel";
+import MovementsPanel from "./movements-panel";
 
 type Account = {
   id: number;
@@ -84,6 +87,24 @@ async function api(path: string, init?: RequestInit) {
     );
   }
   return response.status === 204 ? null : response.json();
+}
+async function download(path: string, filename: string) {
+  const response = await fetch("/api/v1/" + path, {
+    method: "POST",
+    headers: { "X-CSRF-Token": csrfToken },
+    credentials: "same-origin",
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    throw new APIError(body.detail || "Export failed", response.status);
+  }
+  const url = URL.createObjectURL(await response.blob());
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(url);
 }
 const json = (body: unknown) => ({
   method: "POST",
@@ -299,13 +320,17 @@ export default function Dashboard() {
             "Budgets",
             "CSV import",
             "Sessions",
+            "Intelligence",
+            "Privacy",
+            "Movements",
           ].map((name, i) => (
             <button
               key={name}
               className={tab === name ? "active" : ""}
+              aria-current={tab === name ? "page" : undefined}
               onClick={() => setTab(name)}
             >
-              <span>{["◫", "⇄", "▤", "◎", "↥"][i]}</span>
+              <span aria-hidden="true">{["◫", "⇄", "▤", "◎", "↥"][i]}</span>
               {name}
             </button>
           ))}
@@ -394,7 +419,7 @@ export default function Dashboard() {
                 <article className={"stat stat-" + i} key={String(label)}>
                   <div>
                     {label}
-                    <span>{["▤", "↙", "↗", "⇄"][i]}</span>
+                    <span aria-hidden="true">{["▤", "↙", "↗", "⇄"][i]}</span>
                   </div>
                   <strong>{summary ? money(Number(amount)) : "—"}</strong>
                   <small>{hint}</small>
@@ -619,9 +644,6 @@ export default function Dashboard() {
                         category: d.get("category"),
                         kind: d.get("kind"),
                         amount: d.get("amount"),
-                        version: summary?.budgets.find(
-                          (b) => b.category === d.get("category"),
-                        )?.version,
                       }),
                       method: editing ? "PATCH" : "POST",
                     },
@@ -668,6 +690,7 @@ export default function Dashboard() {
                   placeholder="e.g. Weekly groceries"
                 />
               </label>
+              <CategorySuggestion request={api} />
               <label>
                 Category
                 <select name="category" defaultValue={editing?.category}>
@@ -729,7 +752,12 @@ export default function Dashboard() {
               )}
             </div>
             {transactions.length ? (
-              <div className="table-wrap">
+              <div
+                className="table-wrap"
+                tabIndex={0}
+                role="region"
+                aria-label="Scrollable transaction data"
+              >
                 <table>
                   <thead>
                     <tr>
@@ -810,6 +838,20 @@ export default function Dashboard() {
           <button disabled={busy || loading} onClick={() => void loadMore()}>
             Load older transactions
           </button>
+        )}
+        {tab === "Movements" && (
+          <MovementsPanel
+            accounts={accounts}
+            expenses={transactions}
+            request={api}
+            onSaved={reload}
+          />
+        )}
+        {tab === "Intelligence" && (
+          <IntelligencePanel request={api} month={month} />
+        )}
+        {tab === "Privacy" && (
+          <PrivacyPanel request={api} download={download} onDeleted={reload} />
         )}
         {tab === "Sessions" && <SessionPanel request={api} onChange={reload} />}
         {tab === "Budgets" && (
@@ -959,7 +1001,12 @@ export default function Dashboard() {
                   </p>
                 ) : (
                   <>
-                    <div className="table-wrap">
+                    <div
+                      className="table-wrap"
+                      tabIndex={0}
+                      role="region"
+                      aria-label="Scrollable transaction data"
+                    >
                       <table>
                         <thead>
                           <tr>

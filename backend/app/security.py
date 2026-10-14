@@ -15,7 +15,7 @@ class BodyLimit:
         self.app, self.limit = app, limit
 
     async def __call__(self, scope, receive, send):
-        if scope['type'] != 'http' or scope['method'] not in ('POST', 'PUT', 'PATCH'):
+        if scope['type'] != 'http' or scope['method'] not in ('POST', 'PUT', 'PATCH', 'DELETE'):
             return await self.app(scope, receive, send)
         chunks, size = [], 0
         while True:
@@ -56,6 +56,10 @@ def install_security(app):
             'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY',
             'X-Request-ID': request.state.request_id,
         })
+        from .observability import observe
+        route = request.scope.get('route')
+        template = route.path if route and hasattr(route, 'path') else 'unmatched'
+        response.headers['traceparent'] = observe(request.method, template, response.status_code, time.monotonic() - started, request.state.request_id)
         logger.info('request_completed request_id=%s status=%d elapsed_ms=%d', request.state.request_id, response.status_code, (time.monotonic() - started) * 1000)
         return response
 

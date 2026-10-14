@@ -1,0 +1,17 @@
+{
+    email {$TLS_CONTACT_EMAIL}
+}
+{$PUBLIC_HOSTNAME} {
+    header Strict-Transport-Security "max-age=31536000; includeSubDomains"
+    header X-Content-Type-Options nosniff
+    header Referrer-Policy no-referrer
+    request_body {
+        max_size 2MB
+    }
+    reverse_proxy frontend:3010 {
+        transport http {
+            dial_timeout 5s
+            response_header_timeout 30s
+        }
+    }
+}

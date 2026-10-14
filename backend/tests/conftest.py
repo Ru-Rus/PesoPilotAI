@@ -1,6 +1,6 @@
 import os
 os.environ['DATABASE_URL'] = 'sqlite://'
-os.environ['OIDC_CLIENT_SECRET'] = 'test-only-client-secret'
+os.environ['OIDC_CLIENT_SECRET'] = 'test-only-client-secret'  # pragma: allowlist secret -- isolated synthetic fixture
 
 import pytest
 import httpx

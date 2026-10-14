@@ -82,7 +82,7 @@ def authenticated(request: Request, db: Session = Depends(session)):
     timestamp = now()
     if row.expires_at <= timestamp or row.last_seen_at + timedelta(seconds=settings.session_idle_seconds) <= timestamp:
         user_id = row.user_id
-        db.delete(row)
+        db.execute(delete(AuthSession).where(AuthSession.token_hash == row.token_hash))
         db.commit()
         event(db, 'session_expired', user_id)
         raise HTTPException(401, 'Session expired; sign in again')
@@ -122,14 +122,17 @@ def issue_session(db, user_id, response, previous_token=None):
     set_cookie(response, SESSION_COOKIE, token, settings.session_seconds)
 
 @router.get('/login')
-async def login(request: Request, db: Session = Depends(session)):
+async def login(request: Request, db: Session = Depends(session), configure_mfa: bool = False):
     auth_rate(request, db)
     if not settings.oidc_client_secret:
         event(db, 'login_unconfigured')
         raise HTTPException(503, 'Configure Keycloak client credentials to enable login')
     request.scope['session'] = {}
     try:
-        response = await oauth.keycloak.authorize_redirect(request, settings.frontend_url.rstrip('/') + '/api/v1/auth/callback', prompt='login')
+        options = {'prompt': 'login'}
+        if configure_mfa:
+            options['kc_action'] = 'CONFIGURE_TOTP'
+        response = await oauth.keycloak.authorize_redirect(request, settings.frontend_url.rstrip('/') + '/api/v1/auth/callback', **options)
     except Exception:
         event(db, 'provider_unavailable')
         raise HTTPException(503, 'Login provider unavailable')
@@ -225,7 +228,7 @@ def revoke_session(session_id: str, row: AuthSession = Depends(authenticated), d
 @router.post('/logout')
 async def logout(row: AuthSession = Depends(authenticated), db: Session = Depends(session)):
     user_id = row.user_id
-    db.delete(row)
+    db.execute(delete(AuthSession).where(AuthSession.token_hash == row.token_hash, AuthSession.user_id == user_id))
     db.commit()
     event(db, 'logout', user_id)
     # Application logout always revokes locally, even if the provider is offline.

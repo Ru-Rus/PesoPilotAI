@@ -9,7 +9,7 @@ from sqlalchemy import delete, event, select, update
 from app.auth import digest, issue_session, now
 from app.db import Session, engine, settings
 from app.main import app, writable_account
-from app.models import Account, AuthEvent, AuthSession, Budget, ImportBatch, RateBucket, Transaction, User
+from app.models import Account, AuthEvent, AuthSession, Budget, ImportBatch, RateBucket, Transaction, User, Transfer, Refund
 
 user = str(uuid4())
 
@@ -60,6 +60,14 @@ try:
             assert len(db.scalars(select(ImportBatch).where(ImportBatch.user_id == user)).all()) == 1
             assert len(db.scalars(select(Transaction).where(Transaction.user_id == user)).all()) == 2
 
+        refund_payload = {'occurred_at': '2026-10-01', 'amount': '0.02'}
+        assert race(lambda: a.post(f'/api/v1/transactions/{transaction}/refunds', json={**refund_payload, 'idempotency_key': str(uuid4())}), lambda: b.post(f'/api/v1/transactions/{transaction}/refunds', json={**refund_payload, 'idempotency_key': str(uuid4())})) == [201, 409]
+        target = a.post('/api/v1/accounts', json={'name': 'Synthetic target', 'kind': 'cash'}).json()['id']
+        transfer_payload = {'source_id': account, 'target_id': target, 'occurred_at': '2026-10-01', 'amount': '0.01', 'idempotency_key': str(uuid4())}
+        assert race(lambda: a.post('/api/v1/transfers', json=transfer_payload), lambda: b.post('/api/v1/transfers', json=transfer_payload)) == [201, 201]
+        with Session() as db:
+            assert len(db.scalars(select(Transfer).where(Transfer.user_id == user)).all()) == 1
+
         # Prove the posting request reaches the locking SELECT and waits until
         # the concurrent archive commits, then sees the archived state.
         reached_lock = Event()
@@ -83,10 +91,10 @@ try:
                 assert future.result(timeout=10).status_code == 409
         finally:
             event.remove(engine, 'before_cursor_execute', observe)
-        print('SQL Server concurrency passed: single edit winner, single budget winner, atomic repeat import, archive/write serialization.')
+        print('SQL Server concurrency passed: single edit winner, single budget winner, atomic repeat import, archive/write serialization, bounded competing refunds and idempotent transfers.')
 finally:
     with Session() as db:
-        for model in (AuthEvent, AuthSession, ImportBatch, Transaction, Budget, Account):
+        for model in (AuthEvent, AuthSession, ImportBatch, Refund, Transfer, Transaction, Budget, Account):
             db.execute(delete(model).where(model.user_id == user))
         db.execute(delete(RateBucket).where(RateBucket.key == digest('user:' + user)))
         db.execute(delete(User).where(User.id == user))

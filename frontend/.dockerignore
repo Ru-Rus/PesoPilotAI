@@ -1,0 +1,7 @@
+node_modules
+.next
+.env*
+certificates
+.e2e-fixture.json
+test-results
+coverage

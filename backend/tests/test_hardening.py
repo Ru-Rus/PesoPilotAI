@@ -187,7 +187,8 @@ def test_bounded_amount_grammar(value):
 
 
 def production(**overrides):
-    return Settings(_env_file=None, app_env='production', oidc_client_secret='test-only', oidc_issuer='https://identity.example/realm', database_url=overrides.pop('database_url', 'mssql+pyodbc://localhost/PesoPilot?Encrypt=yes&TrustServerCertificate=no'), **overrides)
+    return Settings(_env_file=None, app_env='production', oidc_client_secret='test-only',  # pragma: allowlist secret -- isolated synthetic fixture
+         oidc_issuer='https://identity.example/realm', database_url=overrides.pop('database_url', 'mssql+pyodbc://localhost/PesoPilot?Encrypt=yes&TrustServerCertificate=no'), **overrides)
 
 
 def test_production_transport_guards():
@@ -196,4 +197,4 @@ def test_production_transport_guards():
         with pytest.raises(ValidationError):
             production(database_url=url)
     with pytest.raises(ValidationError):
-        Settings(_env_file=None, app_env='production', oidc_client_secret='test-only')
+        Settings(_env_file=None, app_env='production', oidc_client_secret='test-only')  # pragma: allowlist secret -- isolated synthetic fixture
