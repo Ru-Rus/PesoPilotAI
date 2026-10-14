@@ -23,6 +23,7 @@ jobs:
         run: |
           .venv/bin/python -m pyflakes app tests smoke_concurrency.py
           .venv/bin/python -m bandit -r app -q
+          .venv/bin/python scan_secrets.py
           .venv/bin/python -m alembic heads
       - name: Backend tests and coverage
         working-directory: backend
@@ -34,6 +35,8 @@ jobs:
         working-directory: frontend
         run: |
           npm ci
+          npm run lint
+          npm run test:coverage
           npm run typecheck
           npm run build
           npm audit --audit-level=high
@@ -52,3 +55,80 @@ jobs:
             backend/coverage.xml
             frontend/frontend-build.tgz
           retention-days: 7
+  integration:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+      - name: Install SQL Server driver and dependencies
+        run: |
+          curl -fsSL https://packages.microsoft.com/config/ubuntu/24.04/packages-microsoft-prod.deb -o /tmp/microsoft.deb
+          sudo dpkg -i /tmp/microsoft.deb
+          sudo apt-get update
+          sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18 unixodbc
+          python -m venv backend/.venv
+          backend/.venv/bin/python -m pip install -r backend/requirements-dev.txt
+          cd frontend
+          npm ci
+          npx playwright install --with-deps chromium
+      - name: Start isolated infrastructure
+        working-directory: backend
+        run: .venv/bin/python ci_services.py start
+      - name: SQL Server migrations, finance, concurrency and recovery
+        working-directory: backend
+        run: |
+          .venv/bin/python -m alembic upgrade head
+          .venv/bin/python smoke_sqlserver.py
+          .venv/bin/python smoke_concurrency.py
+          .venv/bin/python verify_permissions.py
+          .venv/bin/python verify_recovery.py
+          .venv/bin/python verify_scale.py
+      - name: Real provider browser workflows
+        env:
+          API_URL: http://127.0.0.1:8001
+        run: |
+          cd backend
+          .venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8001 --no-access-log > ../.tools/ci/api.log 2>&1 &
+          cd ../frontend
+          npm run dev > ../.tools/ci/frontend.log 2>&1 &
+          for attempt in $(seq 1 90); do
+            if curl -kfsS https://localhost:3010/ > /dev/null; then break; fi
+            sleep 2
+          done
+          npm run test:e2e
+      - name: Cleanup owned infrastructure
+        if: always()
+        working-directory: backend
+        run: .venv/bin/python ci_services.py cleanup
+  containers:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Build application images
+        run: |
+          docker build -t pesopilot-backend:qa backend
+          docker build -t pesopilot-frontend:qa frontend
+          docker compose -f deployment/compose.production.yml config --no-interpolate --quiet
+      - uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        with:
+          image-ref: pesopilot-backend:qa
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+          ignore-unfixed: false
+      - uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8
+        with:
+          image-ref: pesopilot-frontend:qa
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+          ignore-unfixed: false

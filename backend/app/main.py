@@ -8,11 +8,17 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 from .db import session
 from .auth import event, now, owner, router as auth_router
-from .models import AuthEvent, Account, Transaction, Budget, ImportBatch
+from .models import AuthEvent, Account, Transaction, Budget, ImportBatch, Transfer, Refund
 from .finance import CATEGORIES, minor, parse_csv
 
 app = FastAPI(title='PesoPilot API', version='0.1.0')
 app.include_router(auth_router, prefix='/api/v1/auth')
+from .privacy import router as privacy_router
+app.include_router(privacy_router, prefix='/api/v1/me')
+from .intelligence import router as intelligence_router
+app.include_router(intelligence_router, prefix='/api/v1/ai')
+from .observability import router as observability_router
+app.include_router(observability_router, prefix='/internal')
 
 from .security import install_security
 install_security(app)
@@ -90,6 +96,11 @@ def ready(db: Session = Depends(session)):
 def accounts(db: Session = Depends(session), user=Depends(owner)):
     rows = db.scalars(select(Account).where(Account.user_id == user)).all()
     balances = dict(db.execute(select(Transaction.account_id, func.sum(case((Transaction.kind == 'income', Transaction.amount_minor), else_=-Transaction.amount_minor))).where(Transaction.user_id == user).group_by(Transaction.account_id)).all())
+    for column, sign in ((Transfer.source_id, -1), (Transfer.target_id, 1)):
+        for identifier, amount in db.execute(select(column, func.sum(Transfer.amount_minor)).where(Transfer.user_id == user).group_by(column)):
+            balances[identifier] = balances.get(identifier, 0) + sign * amount
+    for identifier, amount in db.execute(select(Refund.account_id, func.sum(Refund.amount_minor)).where(Refund.user_id == user).group_by(Refund.account_id)):
+        balances[identifier] = balances.get(identifier, 0) + amount
     return [{**dump(a), 'balance_minor': a.opening_minor + balances.get(a.id, 0)} for a in rows]
 
 @app.patch('/api/v1/accounts/{account_id}')
@@ -144,6 +155,8 @@ def edit_transaction(transaction_id: int, body: TransactionEdit, db: Session = D
     row = transaction_owned(db, transaction_id, user)
     for account_id in sorted({row.account_id, body.account_id}):
         writable_account(db, account_id, user)
+    if db.scalar(select(Refund.id).where(Refund.original_id == transaction_id, Refund.user_id == user).limit(1)) and (row.amount_minor != minor(body.amount) or row.kind != body.kind or row.account_id != body.account_id or row.category != body.category):
+        raise HTTPException(409, 'Refund-linked financial fields are immutable')
     values = body.model_dump(exclude={'amount', 'version'})
     result = db.execute(update(Transaction).where(Transaction.id == transaction_id, Transaction.user_id == user, Transaction.version == body.version).values(**values, amount_minor=minor(body.amount), version=Transaction.version + 1))
     if result.rowcount != 1:
@@ -165,7 +178,10 @@ def add_transaction(body: TransactionInput, db: Session = Depends(session), user
 
 @app.delete('/api/v1/transactions/{transaction_id}', status_code=204)
 def delete_transaction(transaction_id: int, version: int | None = None, db: Session = Depends(session), user=Depends(owner)):
-    transaction_owned(db, transaction_id, user)
+    row = transaction_owned(db, transaction_id, user)
+    account_owned(db, row.account_id, user, lock=True)
+    if db.scalar(select(Refund.id).where(Refund.original_id == transaction_id, Refund.user_id == user).limit(1)):
+        raise HTTPException(409, 'Refund-linked expenses cannot be deleted')
     if version is None:
         raise HTTPException(428, 'Supply the current transaction version before deleting')
     result = db.execute(delete(Transaction).where(Transaction.id == transaction_id, Transaction.user_id == user, Transaction.version == version))
@@ -213,6 +229,9 @@ def summary(month: str, db: Session = Depends(session), user=Depends(owner)):
     for kind, category, amount in totals:
         if kind == 'expense':
             categories[category] = amount
+    for category, amount in db.execute(select(Refund.category, func.sum(Refund.amount_minor)).where(Refund.user_id == user, Refund.occurred_at >= start, Refund.occurred_at < end).group_by(Refund.category)):
+        expense -= amount
+        categories[category] -= amount
     budgets = db.scalars(select(Budget).where(Budget.user_id == user, Budget.month == month)).all()
     return {'income_minor': income, 'expense_minor': expense, 'net_minor': income - expense, 'categories': categories, 'budgets': [{**dump(b), 'spent_minor': categories[b.category]} for b in budgets]}
 
@@ -256,3 +275,6 @@ async def confirm(account_id: int = Form(...), digest: str = Form(...), acknowle
         db.rollback()
         raise HTTPException(409, 'File already imported; no rows added')
     return {'imported': len(rows)}
+
+from .movements import router as movements_router
+app.include_router(movements_router, prefix='/api/v1')

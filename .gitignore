@@ -19,3 +19,11 @@ coverage.xml
 .hypothesis/
 frontend-build.tgz
 frontend-smoke.log
+
+.e2e-fixture.json
+frontend/test-results/
+frontend/playwright-report/
+frontend/coverage/
+backend/.qa-backups/
+
+.mypy_cache/

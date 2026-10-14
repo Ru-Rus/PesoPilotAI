@@ -1,0 +1,55 @@
+services:
+  backend:
+    build: ../backend
+    environment:
+      APP_ENV: production
+      FRONTEND_URL: ${FRONTEND_URL:?Configure the HTTPS origin}
+      OIDC_ISSUER: ${OIDC_ISSUER:?Configure production HTTPS OIDC}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:?Configure provider client}
+      DATABASE_URL_FILE: /run/secrets/database_url
+      OIDC_CLIENT_SECRET_FILE: /run/secrets/oidc_client_secret
+      METRICS_TOKEN_FILE: /run/secrets/metrics_token
+    secrets: [database_url, oidc_client_secret, metrics_token]
+    read_only: true
+    tmpfs: [/tmp]
+    mem_limit: 512m
+    cpus: 1.0
+    restart: unless-stopped
+    security_opt: [no-new-privileges:true]
+  frontend:
+    build:
+      context: ../frontend
+      args:
+        API_URL: http://backend:8000
+    read_only: true
+    tmpfs: [/tmp]
+    mem_limit: 512m
+    cpus: 1.0
+    restart: unless-stopped
+    security_opt: [no-new-privileges:true]
+    depends_on:
+      backend:
+        condition: service_healthy
+  ingress:
+    image: caddy:2.10.2
+    ports: ["80:80", "443:443"]
+    environment:
+      PUBLIC_HOSTNAME: ${PUBLIC_HOSTNAME:?Configure verified public DNS}
+      TLS_CONTACT_EMAIL: ${TLS_CONTACT_EMAIL:?Configure certificate contact}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    mem_limit: 256m
+    restart: unless-stopped
+    depends_on: [frontend]
+secrets:
+  database_url:
+    file: ${DATABASE_URL_SECRET_FILE:?Provide a verified TLS connection secret file}
+  oidc_client_secret:
+    file: ${OIDC_CLIENT_SECRET_FILE:?Provide provider secret file}
+  metrics_token:
+    file: ${METRICS_TOKEN_SECRET_FILE:?Provide operator metrics token file}
+volumes:
+  caddy-data:
+  caddy-config:
