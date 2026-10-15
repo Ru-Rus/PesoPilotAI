@@ -21,6 +21,7 @@ jobs:
       - name: Backend lint and security analysis
         working-directory: backend
         run: |
+          .venv/bin/python -m mypy app
           .venv/bin/python -m pyflakes app tests smoke_concurrency.py
           .venv/bin/python -m bandit -r app -q
           .venv/bin/python scan_secrets.py

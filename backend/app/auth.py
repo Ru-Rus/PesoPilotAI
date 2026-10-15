@@ -3,6 +3,8 @@
 No provider tokens or OAuth state are placed in browser-readable storage.
 UTC datetimes are stored without tzinfo for consistent SQL Server handling.
 """
+from typing import cast
+from sqlalchemy.engine import CursorResult
 import hashlib
 import json
 import secrets
@@ -42,7 +44,7 @@ def rate_limit(db, key, limit):
     # An atomic UPDATE avoids lost increments across threads/processes.
     for attempt in range(3):
         result = db.execute(update(RateBucket).where(RateBucket.key == key, RateBucket.window == window).values(count=RateBucket.count + 1))
-        if result.rowcount:
+        if cast(CursorResult, result).rowcount:
             db.commit()
             break
         db.add(RateBucket(key=key, window=window, count=1))
@@ -103,7 +105,7 @@ def authenticated(request: Request, db: Session = Depends(session)):
         AuthSession.last_seen_at > timestamp - timedelta(seconds=settings.session_idle_seconds),
     ).values(last_seen_at=case((AuthSession.last_seen_at < timestamp, timestamp), else_=AuthSession.last_seen_at)), execution_options={'synchronize_session': False})
     db.commit()
-    if result.rowcount != 1:
+    if cast(CursorResult, result).rowcount != 1:
         raise HTTPException(401, 'Session expired or revoked; sign in again')
     return row
 
@@ -147,6 +149,7 @@ async def login(request: Request, db: Session = Depends(session), configure_mfa:
 
 @router.get('/callback')
 async def callback(request: Request, db: Session = Depends(session)):
+    response: Response
     auth_rate(request, db)
     token = request.cookies.get(FLOW_COOKIE, '')
     flow = db.get(LoginFlow, digest(token)) if token else None
@@ -156,7 +159,7 @@ async def callback(request: Request, db: Session = Depends(session)):
     payload = flow.payload
     result = db.execute(delete(LoginFlow).where(LoginFlow.token_hash == flow.token_hash))
     db.commit()
-    if result.rowcount != 1:
+    if cast(CursorResult, result).rowcount != 1:
         raise HTTPException(400, 'Login request already consumed')
     request.scope['session'] = json.loads(payload)
     try:
@@ -188,6 +191,8 @@ async def callback(request: Request, db: Session = Depends(session)):
     else:
         user.display_name = name
         db.commit()
+    if user is None:
+        raise HTTPException(503, 'Identity changed concurrently; sign in again')
     response = RedirectResponse(settings.frontend_url, status_code=303)
     issue_session(db, user.id, response, request.cookies.get(SESSION_COOKIE, ''))
     clear_cookie(response, FLOW_COOKIE)
@@ -198,6 +203,8 @@ async def callback(request: Request, db: Session = Depends(session)):
 @router.get('/me')
 def me(row: AuthSession = Depends(authenticated), db: Session = Depends(session)):
     user = db.get(User, row.user_id)
+    if user is None:
+        raise HTTPException(401, 'Identity no longer exists; sign in again')
     return JSONResponse({'id': user.id, 'name': user.display_name, 'csrf_token': row.csrf_token}, headers={'Cache-Control': 'no-store'})
 
 @router.get('/sessions')
@@ -214,7 +221,7 @@ def sessions(row: AuthSession = Depends(authenticated), db: Session = Depends(se
 @router.delete('/sessions/{session_id}', status_code=204)
 def revoke_session(session_id: str, row: AuthSession = Depends(authenticated), db: Session = Depends(session)):
     result = db.execute(delete(AuthSession).where(AuthSession.token_hash == session_id, AuthSession.user_id == row.user_id))
-    if result.rowcount != 1:
+    if cast(CursorResult, result).rowcount != 1:
         db.rollback()
         event(db, 'authorization_denied', row.user_id)
         raise HTTPException(404, 'Session not found')

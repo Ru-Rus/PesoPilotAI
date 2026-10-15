@@ -287,8 +287,8 @@ test("transfers preserve total balances and refunds reconcile expense totals", a
 });
 
 function totp(secret: string) {
-  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
-  let bits = ""; // pragma: allowlist secret -- public base32 alphabet
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"; // pragma: allowlist secret -- public base32 alphabet
+  let bits = "";
   for (const character of secret.replace(/\s/g, "").toUpperCase())
     bits += alphabet.indexOf(character).toString(2).padStart(5, "0");
   const bytes = Buffer.from(

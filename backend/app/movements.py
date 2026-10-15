@@ -80,7 +80,7 @@ def refund(original_id: int, body: MovementInput, db: Session = Depends(session)
             raise HTTPException(409, 'Idempotency key already used with different values')
         return dump(previous)
     total = db.scalar(select(func.coalesce(func.sum(Refund.amount_minor), 0)).where(Refund.original_id == original_id, Refund.user_id == user))
-    if total + amount > original.amount_minor or body.occurred_at < original.occurred_at:
+    if (total or 0) + amount > original.amount_minor or body.occurred_at < original.occurred_at:
         raise HTTPException(409, 'Refund exceeds the expense or predates it')
     return finish(db, Refund, values, user)
 

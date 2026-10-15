@@ -90,3 +90,19 @@ def test_forged_session_denied(client):
     c.cookies.clear()
     c.cookies.set(SESSION_COOKIE, 'forged')
     assert c.get('/api/v1/accounts').status_code == 401
+
+
+def test_identity_removed_during_me_fails_closed(client, monkeypatch):
+    from sqlalchemy.orm import Session
+    from app.models import User
+    original_get = Session.get
+
+    def get(db, model, *args, **kwargs):
+        if model is User:
+            return None
+        return original_get(db, model, *args, **kwargs)
+
+    monkeypatch.setattr(Session, 'get', get)
+    response = client[0].get('/api/v1/auth/me')
+    assert response.status_code == 401
+    assert 'csrf_token' not in response.json()
