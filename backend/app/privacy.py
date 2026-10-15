@@ -1,4 +1,6 @@
 """User-controlled export, consent and transactional application-data deletion."""
+from typing import cast
+from sqlalchemy.engine import CursorResult
 import csv
 import io
 from datetime import timedelta
@@ -37,7 +39,8 @@ def export_data(format: Literal['json', 'csv'] = 'json', db: Session = Depends(s
     fresh(identity)
     db.connection(execution_options={'isolation_level': 'SERIALIZABLE'})
     payload = {}
-    for name, model in [('accounts', Account), ('transactions', Transaction), ('budgets', Budget), ('imports', ImportBatch), ('model_consent', ModelConsent), ('transfers', Transfer), ('refunds', Refund)]:
+    export_models: list[tuple[str, type[Account] | type[Transaction] | type[Budget] | type[ImportBatch] | type[ModelConsent] | type[Transfer] | type[Refund]]] = [('accounts', Account), ('transactions', Transaction), ('budgets', Budget), ('imports', ImportBatch), ('model_consent', ModelConsent), ('transfers', Transfer), ('refunds', Refund)]
+    for name, model in export_models:
         rows = db.scalars(select(model).where(model.user_id == identity.user_id).limit(50_001)).all()
         if len(rows) > 50_000:
             raise HTTPException(413, 'Export exceeds the synchronous 50,000-row limit; contact the operator for a verified export')
@@ -78,7 +81,7 @@ def save_consent(body: ConsentInput, db: Session = Depends(session), identity=De
         db.add(ModelConsent(user_id=identity.user_id, enabled=body.enabled, updated_at=now(), version=1))
     else:
         result = db.execute(update(ModelConsent).where(ModelConsent.user_id == identity.user_id, ModelConsent.version == body.version).values(enabled=body.enabled, updated_at=now(), version=ModelConsent.version + 1))
-        if result.rowcount != 1:
+        if cast(CursorResult, result).rowcount != 1:
             db.rollback()
             raise HTTPException(409, 'Consent changed; reload')
     db.add(AuthEvent(event='model_consent_changed', user_id=identity.user_id, occurred_at=now()))

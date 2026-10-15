@@ -1,3 +1,5 @@
+from typing import cast
+from sqlalchemy.engine import CursorResult
 import hashlib
 from datetime import date
 from typing import Literal
@@ -74,8 +76,15 @@ class BudgetInput(Input):
     month: str = Field(pattern=r'^\d{4}-(0[1-9]|1[0-2])$')
     category: str
     amount: str = Field(max_length=32)
-    _category = field_validator('category')(TransactionInput.category_valid.__func__)
-    _amount = field_validator('amount')(TransactionInput.amount_valid.__func__)
+    @field_validator('category')
+    @classmethod
+    def category_valid(cls, value: str) -> str:
+        return TransactionInput.category_valid(value)
+
+    @field_validator('amount')
+    @classmethod
+    def amount_valid(cls, value: str) -> str:
+        return TransactionInput.amount_valid(value)
 
 def dump(row):
     return {column.name: getattr(row, column.name) for column in row.__table__.columns if column.name != 'user_id'}
@@ -95,7 +104,7 @@ def ready(db: Session = Depends(session)):
 @app.get('/api/v1/accounts')
 def accounts(db: Session = Depends(session), user=Depends(owner)):
     rows = db.scalars(select(Account).where(Account.user_id == user)).all()
-    balances = dict(db.execute(select(Transaction.account_id, func.sum(case((Transaction.kind == 'income', Transaction.amount_minor), else_=-Transaction.amount_minor))).where(Transaction.user_id == user).group_by(Transaction.account_id)).all())
+    balances: dict[int, int] = {identifier: amount for identifier, amount in db.execute(select(Transaction.account_id, func.sum(case((Transaction.kind == 'income', Transaction.amount_minor), else_=-Transaction.amount_minor))).where(Transaction.user_id == user).group_by(Transaction.account_id))}
     for column, sign in ((Transfer.source_id, -1), (Transfer.target_id, 1)):
         for identifier, amount in db.execute(select(column, func.sum(Transfer.amount_minor)).where(Transfer.user_id == user).group_by(column)):
             balances[identifier] = balances.get(identifier, 0) + sign * amount
@@ -107,7 +116,7 @@ def accounts(db: Session = Depends(session), user=Depends(owner)):
 def edit_account(account_id: int, body: AccountEdit, db: Session = Depends(session), user=Depends(owner)):
     account_owned(db, account_id, user, lock=True)
     result = db.execute(update(Account).where(Account.id == account_id, Account.user_id == user, Account.version == body.version).values(**body.model_dump(exclude={'version'}), version=Account.version + 1))
-    if result.rowcount != 1:
+    if cast(CursorResult, result).rowcount != 1:
         db.rollback()
         raise HTTPException(409, 'Account changed; reload before editing')
     db.add(AuthEvent(event='account_updated', user_id=user, occurred_at=now()))
@@ -159,7 +168,7 @@ def edit_transaction(transaction_id: int, body: TransactionEdit, db: Session = D
         raise HTTPException(409, 'Refund-linked financial fields are immutable')
     values = body.model_dump(exclude={'amount', 'version'})
     result = db.execute(update(Transaction).where(Transaction.id == transaction_id, Transaction.user_id == user, Transaction.version == body.version).values(**values, amount_minor=minor(body.amount), version=Transaction.version + 1))
-    if result.rowcount != 1:
+    if cast(CursorResult, result).rowcount != 1:
         db.rollback()
         raise HTTPException(409, 'Transaction changed; reload before editing')
     db.add(AuthEvent(event='transaction_updated', user_id=user, occurred_at=now()))
@@ -185,7 +194,7 @@ def delete_transaction(transaction_id: int, version: int | None = None, db: Sess
     if version is None:
         raise HTTPException(428, 'Supply the current transaction version before deleting')
     result = db.execute(delete(Transaction).where(Transaction.id == transaction_id, Transaction.user_id == user, Transaction.version == version))
-    if result.rowcount != 1:
+    if cast(CursorResult, result).rowcount != 1:
         db.rollback()
         raise HTTPException(409, 'Transaction changed; reload before deleting')
     db.add(AuthEvent(event='transaction_deleted', user_id=user, occurred_at=now()))
@@ -203,7 +212,7 @@ def save_budget(body: BudgetInput, db: Session = Depends(session), user=Depends(
         if body.version is None:
             raise HTTPException(428, 'Supply the current budget version before updating')
         result = db.execute(update(Budget).where(Budget.id == row.id, Budget.user_id == user, Budget.version == body.version).values(limit_minor=minor(body.amount), version=Budget.version + 1))
-        if result.rowcount != 1:
+        if cast(CursorResult, result).rowcount != 1:
             db.rollback()
             raise HTTPException(409, 'Budget changed; reload before editing')
     db.add(AuthEvent(event='budget_saved', user_id=user, occurred_at=now()))

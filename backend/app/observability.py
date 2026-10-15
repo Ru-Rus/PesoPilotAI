@@ -4,15 +4,26 @@ import threading
 import time
 from collections import Counter, deque
 from uuid import uuid4
+from typing import TypedDict
+
+class Trace(TypedDict):
+    trace_id: str
+    span_id: str
+    request_id: str
+    method: str
+    route: str
+    status: int
+    duration_ms: float
+
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response
 from .db import settings
 
 router = APIRouter()
 lock = threading.Lock()
-counts = Counter()
-latencies = Counter()
-traces = deque(maxlen=500)
+counts: Counter[tuple[str, str, int]] = Counter()
+latencies: Counter[float | str] = Counter()
+traces: deque[Trace] = deque(maxlen=500)
 started = time.monotonic()
 BUCKETS = (0.01, 0.05, 0.1, 0.5, 1, 2, 5, 10)
 

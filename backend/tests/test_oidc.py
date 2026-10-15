@@ -91,3 +91,25 @@ def test_invalid_oidc_claims_denied(client, provider, fault):
     with factory() as db:
         assert db.scalar(select(User).where(User.subject == 'signed-fixture-user')) is None
         assert db.scalar(select(AuthEvent).where(AuthEvent.event == 'login_rejected')) is not None
+
+
+def test_identity_race_without_surviving_user_issues_no_session(client, provider, monkeypatch):
+    from sqlalchemy.exc import IntegrityError
+    from sqlalchemy.orm import Session
+    c, factory = client
+    state, _ = start(c, provider)
+    previous = c.cookies.get(SESSION_COOKIE)
+    original_commit = Session.commit
+
+    def commit(db):
+        if any(isinstance(row, User) and row.subject == 'signed-fixture-user' for row in db.new):
+            raise IntegrityError('synthetic concurrent identity change', {}, None)
+        return original_commit(db)
+
+    monkeypatch.setattr(Session, 'commit', commit)
+    response = c.get('/api/v1/auth/callback', params={'state': state, 'code': 'fixture-code'}, follow_redirects=False)
+    assert response.status_code == 503
+    assert c.cookies.get(SESSION_COOKIE) == previous
+    with factory() as db:
+        assert db.scalar(select(AuthEvent).where(AuthEvent.event == 'login_success')) is None
+        assert db.scalar(select(User).where(User.subject == 'signed-fixture-user')) is None
